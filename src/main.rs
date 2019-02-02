@@ -1,6 +1,27 @@
 extern crate clap;
 use clap::{App, Arg};
 
+#[macro_use]
+extern crate error_chain;
+mod errors {
+    // Create the Error, ErrorKind, ResultExt, and Result types
+    error_chain! {}
+}
+error_chain! {
+    errors {
+        AddFailed(r: &'static str) {
+            description("Adding the command failed")
+            display("Adding the command failed: '{}'", r)
+        }
+        RunningCommandFailed(c: String) {
+            description("Running the command failed")
+            display("Running the command '{}' failed", c)
+        }
+        ReadRemindersFileFailed
+        ReadingInputFailed
+    }
+}
+
 extern crate dirs;
 extern crate nix;
 
@@ -10,7 +31,9 @@ use std::fs::OpenOptions;
 use std::io::prelude::*;
 use std::iter::FromIterator;
 
-fn main() -> std::io::Result<()> {
+quick_main!(run);
+
+fn run() -> Result<()> {
     let matches = App::new("Command Reminder")
         .version("1.0")
         .author("Dean Johnson <dean@deanljohnson.com>")
@@ -55,10 +78,12 @@ fn main() -> std::io::Result<()> {
 /// Will either add the command to the reminders file
 /// or ask the user if they want to merge these keywords
 /// with any other keywords already existing for the command.
-fn do_add(command: &str, keywords: &str) -> std::result::Result<(), std::io::Error> {
-    let data = read_reminders_file()?;
+fn do_add(command: &str, keywords: &str) -> Result<()> {
+    let data = read_reminders_file().chain_err(|| ErrorKind::ReadRemindersFileFailed)?;
 
-    // TODO: verify non-empty command
+    if command.trim().is_empty() {
+        return Err(ErrorKind::AddFailed("Command was empty").into());
+    }
 
     let mut line_index: usize = 0;
     for line in data.lines() {
@@ -73,9 +98,9 @@ fn do_add(command: &str, keywords: &str) -> std::result::Result<(), std::io::Err
 
 /// Handles removing commands for a given keyword.
 /// Will ask the user before removing each command.
-fn do_remove(keywords: &str) -> std::result::Result<(), std::io::Error> {
+fn do_remove(keywords: &str) -> Result<()> {
     // TODO: what happens if keywords has a "#"?
-    let data = read_reminders_file()?;
+    let data = read_reminders_file().chain_err(|| ErrorKind::ReadRemindersFileFailed)?;
     let data_lines = data.lines().collect();
     let keywords_vec = keywords.split(" ").collect();
 
@@ -106,16 +131,19 @@ fn do_remove(keywords: &str) -> std::result::Result<(), std::io::Error> {
 
 /// Handles the command "[keywords]".
 /// Will search for commands with any of the given keywords.
-fn do_search(keywords: Vec<&str>) -> std::result::Result<(), std::io::Error> {
-    let data = read_reminders_file()?;
+fn do_search(keywords: Vec<&str>) -> Result<()> {
+    let data = read_reminders_file().chain_err(|| ErrorKind::ReadRemindersFileFailed)?;
     let data_lines = data.lines().collect();
     let cmd_vec = find_matching_commands(&data_lines, &keywords);
 
     match cmd_vec.len() {
         0 => println!("No commands found with any of the given keywords"),
         1 => {
-            if ask_yes_no(&format!("Run '{}'? (y/n) ", data_lines[0]))? {
-                run_command(data_lines[0])?;
+            if ask_yes_no(&format!("Run '{}'? (y/n) ", data_lines[0]))
+                .chain_err(|| ErrorKind::ReadingInputFailed)?
+            {
+                run_command(data_lines[0])
+                    .chain_err(|| ErrorKind::RunningCommandFailed(String::from(data_lines[0])))?;
             }
             return Ok(());
         }
@@ -124,8 +152,9 @@ fn do_search(keywords: Vec<&str>) -> std::result::Result<(), std::io::Error> {
                 .iter()
                 .map(|l| data_lines[*l])
                 .collect::<Vec<&str>>();
-            let cmd_number = ask_multiple(&options)?;
-            return run_command(options[cmd_number]);
+            let cmd_number = ask_multiple(&options).chain_err(|| ErrorKind::ReadingInputFailed)?;
+            return run_command(options[cmd_number])
+                .chain_err(|| ErrorKind::RunningCommandFailed(String::from(options[cmd_number])));
         }
     }
 
@@ -138,25 +167,24 @@ fn add_to_preexisting_command(
     command: &str,
     keywords: &str,
     command_line: usize,
-) -> std::result::Result<(), std::io::Error> {
-    if ask_yes_no("A reminder already exists for the given command. Merge keywords? (y/n) ")? {
-        merge_keywords(data.as_ref(), command, keywords, command_line)?;
+) -> Result<()> {
+    if ask_yes_no("A reminder already exists for the given command. Merge keywords? (y/n) ")
+        .chain_err(|| ErrorKind::ReadingInputFailed)?
+    {
+        merge_keywords(data.as_ref(), command, keywords, command_line)
+            .chain_err(|| "Error merging keywords")?;
     }
     return Ok(());
 }
 
 /// Handles adding a new command reminder
-fn add_new_command(
-    data: &str,
-    command: &str,
-    keywords: &str,
-) -> std::result::Result<(), std::io::Error> {
+fn add_new_command(data: &str, command: &str, keywords: &str) -> Result<()> {
     let new_data = format!("{}# {}\n{}", data, keywords, command);
     return write_reminders_file(&new_data);
 }
 
 /// Reads the reminders file into a string.
-fn read_reminders_file() -> std::result::Result<String, std::io::Error> {
+fn read_reminders_file() -> Result<String> {
     // Setup path to file
     let mut path = dirs::config_dir().unwrap();
     path.push("command-reminder");
@@ -167,16 +195,18 @@ fn read_reminders_file() -> std::result::Result<String, std::io::Error> {
         .read(true)
         .write(true)
         .create(true)
-        .open(&path)?;
+        .open(&path)
+        .chain_err(|| "Opening the reminders file failed")?;
 
     // Read file into string and return
     let mut data = String::new();
-    file.read_to_string(&mut data)?;
+    file.read_to_string(&mut data)
+        .chain_err(|| ErrorKind::ReadRemindersFileFailed)?;
     return Ok(data);
 }
 
 /// Overwrites the reminders file with the given string.
-fn write_reminders_file(data: &str) -> std::result::Result<(), std::io::Error> {
+fn write_reminders_file(data: &str) -> Result<()> {
     // Setup path to file
     let mut path = dirs::config_dir().unwrap();
     path.push("command-reminder");
@@ -186,17 +216,13 @@ fn write_reminders_file(data: &str) -> std::result::Result<(), std::io::Error> {
         .create(true)
         .write(true)
         .truncate(true)
-        .open(&path)?;
-    return writeln!(file, "{}", data);
+        .open(&path)
+        .chain_err(|| "Error opening reminders file")?;
+    return writeln!(file, "{}", data).chain_err(|| "Error writing to stdout");
 }
 
 /// Merges the given keywords with any existing keywords for the given command.
-fn merge_keywords(
-    data: &str,
-    _command: &str,
-    keywords: &str,
-    command_line: usize,
-) -> std::result::Result<(), std::io::Error> {
+fn merge_keywords(data: &str, _command: &str, keywords: &str, command_line: usize) -> Result<()> {
     let mut data_lines = data.lines().collect::<Vec<&str>>();
     let keywords_str = data_lines[command_line - 1];
 
@@ -223,15 +249,11 @@ fn merge_keywords(
 
 /// Runs the given command via "exec", thereby replacing this processes image.
 fn run_command(cmd: &str) -> std::result::Result<(), std::io::Error> {
-    println!("running {}", cmd);
     let cmd_parts = cmd.splitn(2, " ").collect::<Vec<&str>>();
     let cmd_args = cmd_parts[1]
         .split(" ")
         .map(|s| CString::new(s).unwrap())
         .collect::<Vec<CString>>();
-
-    println!("{:?}", cmd_parts);
-    println!("{:?}", cmd_args);
 
     return match nix::unistd::execvp(&CString::new(cmd_parts[0])?, &cmd_args) {
         Ok(_) => Ok(()),
